@@ -9,15 +9,13 @@ import asyncio
 from aiogram import types
 from aiogram.bot import Bot
 
-from a_utils import open_write_console, select_hero, cusotom_click
+from .a_utils import open_write_console, select_hero, cusotom_click
+from .config import CHANNELS, token
 
 
 
-ADMINS = [486178287]
-CHANNELS = [-1001826949768]
-token = "6580900144:AAFu5CNz2J9AOwEYspzEa1ODXE3Y4A2W8Z0"
+
 bot = Bot(token)
-steam_api_key = "266DD08608085CE8EC90240302249C49"
 
 sess = requests.session()
 
