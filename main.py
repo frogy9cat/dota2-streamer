@@ -10,12 +10,12 @@ from aiogram import types
 from aiogram.bot import Bot
 
 from .a_utils import open_write_console, select_hero, cusotom_click
-from .config import CHANNELS, token
+from .config import CHANNELS, BOT_TOKEN
 
 
 
 
-bot = Bot(token)
+bot = Bot(BOT_TOKEN)
 
 sess = requests.session()
 
