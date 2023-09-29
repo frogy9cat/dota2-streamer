@@ -5,23 +5,21 @@ import pydirectinput
 import win32gui
 import cv2
 import json
-import asyncio
+import pyautogui
 from aiogram import types
 from aiogram.bot import Bot
+import asyncio
 
-from .a_utils import open_write_console, select_hero, cusotom_click
-from .config import CHANNELS, BOT_TOKEN
-
+from script_utils import open_write_console, cusotom_click, make_img_grey, get_hero
+from obs_websocket import start_rec, stop_rec
+from user_bot import send_replay
+from config import ADMINS, CHANNELS, VID_CHANNEL_TAG, VID_CHANNEL_ID, BOT_TOKEN
 
 
 
 bot = Bot(BOT_TOKEN)
 
 sess = requests.session()
-
-with open("heroes.json", "r") as j:
-    heroes = json.loads(j.read())['heroes']
-
 
 
 async def send_through_bot(chat_id, text):
@@ -45,34 +43,50 @@ def set_active_dota():
 
 async def check_is_start():
     is_start_screen = get_custom_screen(1700, 1025, 1900, 1075)
-
     is_start_screen.save("media/is_start_current.png")
 
-    is_start_rgb = cv2.imread("media/is_start_current.png")
-    is_start_grey = cv2.cvtColor(is_start_rgb, cv2.COLOR_BGR2RGB)
-
-    tmp_rgb = cv2.imread("media/is_start_tmp.png")
-    tmp_grey = cv2.cvtColor(tmp_rgb, cv2.COLOR_BGR2RGB)
+    is_start_grey = make_img_grey("media/is_start_current.png")
+    tmp_grey = make_img_grey("media/is_start_tmp.png")
 
     res = cv2.matchTemplate(is_start_grey, tmp_grey, cv2.TM_CCOEFF_NORMED)
 
     if res[0][0] > 0.8:
         return True
     else:
-        await check_in_menu(1)
+        await check_in_menu()
 
 
 
-async def enter_latest_live_match(player=1):
+async def enter_latest_live_match(server_steam_id=None):
 
+    try:
+        await stop_rec()
+    except:
+            pass
+
+    # Trying to find a match
     result = sess.get("https://api.opendota.com/api/live")
-    latest_match = json.loads(result.content)[-1]
+    lives = json.loads(result.content)
+    latest_match = lives[-1]
+    if server_steam_id:
+        for live in lives:
+            if live['server_steam_id'] == server_steam_id:
+                latest_match =live
+                return latest_match
+            else:
+                for admin in ADMINS:
+                    await bot.send_message(chat_id=int(admin))
+    else:
+        pass
+
+  
     match_id = int(latest_match["match_id"])
-    print(match_id)
+    print("Match id: "+str(match_id))
 
     server_steam_id = latest_match['server_steam_id']
-    print(server_steam_id)
-#
+    print("Server steam id: "+str(server_steam_id))
+
+    # Get, order, and send match statistics
     for channel in CHANNELS:
         chat = await bot.get_chat(chat_id=channel)
         pinned_msg = chat["pinned_message"]["text"]
@@ -86,117 +100,166 @@ async def enter_latest_live_match(player=1):
         await send_statistics(message=statistics)
     except:
         await enter_latest_live_match(1)
-#
+
+    # Opening new match
     connect_command = f"watch_server {server_steam_id}"
     set_active_dota()
     time.sleep(0.3)
     open_write_console(connect_command)
     time.sleep(10)
+    await start_rec()
+
+    # Waiting for the start / main page
     while True: 
         time.sleep(2)
         pydirectinput.press("1")
         is_start = await check_is_start()
-        await check_in_menu(1)
         if is_start:
+
             time.sleep(0.1)
             cusotom_click(1894, 71)
-            select_hero(num=player)
             time.sleep(0.1)
-            open_write_console(command='dota_spectator_mode 2')
-            open_write_console(command='dota_minimap_always_draw_hero_icons false')
-            open_write_console(command='dota_camera_hold_select_to_follow true')
-            open_write_console(command='dota_spectator_fog_of_war -1')
+            pyautogui.moveTo(800, 100)
+
+            # Setting default settings in dota 2 console
+            default_commands = [
+                'dota_spectator_mode 2',
+                'dota_minimap_always_draw_hero_icons false',
+                'dota_camera_hold_select_to_follow true',
+                'dota_spectator_fog_of_war -1'
+            ]
+            open_write_console(command=default_commands)
+            time.sleep(0.1)
+    
             pydirectinput.press('y')
             break
         else:
             time.sleep(1)
-    await update_statistics(match_id=match_id)
+    
+    try:
+        await update_statistics(match_id=match_id)
+        print("Statistics are updated successfully!")
+    except:
+        print("Statistics are not updated!")
+        pass
+
+    
+    try:
+        # Sendig a replay that was recorded one match ago
+        await send_replay()
+
+        # Addind video url to message in the main channel
+        video_channel = await bot.get_chat(chat_id=VID_CHANNEL_ID)
+        pinned_vid_id = video_channel["pinned_message"]["message_id"]
+
+        await bot.send_message(chat_id=486178287, text=video_channel)
+        await bot.pin_chat_message(chat_id=VID_CHANNEL_ID, message_id=pinned_vid_id+2)
+        
+        try:
+            await bot.delete_message(chat_id=VID_CHANNEL_ID, message_id=pinned_vid_id+1)
+        except:
+            pass
+
+        try:
+            for channel in CHANNELS:
+                chat = await bot.get_chat(chat_id=channel)
+                video_channel = await bot.get_chat(chat_id=VID_CHANNEL_ID)
+                pinned_vid_id = video_channel["pinned_message"]["message_id"]
+
+                try:
+                    pinned_msg = chat["pinned_message"]["text"]
+                    pinned_id = chat["pinned_message"]["message_id"]
+                    msg_for_link = int(pinned_id) - 4
+                    await bot.edit_message_text(
+                        text=pinned_msg+f'\n<a href="https://t.me/{VID_CHANNEL_TAG}/{pinned_vid_id}">Watch replay</a>',
+                        chat_id=channel, 
+                        message_id=msg_for_link,
+                        parse_mode="HTML")
+                except:
+                    print("Message with stats is probably deleted")
+    
+        except:
+            pass
+
+    except:
+        pass
+
+    # Just the end of the function
     return True
 
 
 
-async def check_in_menu(player: int):
+async def check_in_menu():
     base_screen = get_custom_screen(600, 0, 1200, 50)
-    base_screen.save("media/screen.png")            #check if there are menu buttons
+    base_screen.save("media/screen.png")            
 
-    scrn = get_custom_screen(800, 425, 1100, 650)
-    scrn.save("media/is_ok_button.png")             #check if there is "ok" button
+    ok_button = get_custom_screen(800, 425, 1100, 650)
+    ok_button.save("media/is_ok_button.png")             
 
-    base_img_rgb = cv2.imread("media/screen.png")
-    base_img_grey = cv2.cvtColor(base_img_rgb, cv2.COLOR_BGR2RGB)
+    # Check if there are menu buttons
+    base_screen_grey = make_img_grey("media/screen.png")
+    base_tmp_grey = make_img_grey("media/template.png")
 
-    base_tmp_rgb = cv2.imread("media/template.png")
-    base_tmp_grey = cv2.cvtColor(base_tmp_rgb, cv2.COLOR_BGR2RGB)
+    # Check if there is "ok" button
+    is_ok_btn_grey = make_img_grey("media/is_ok_button.png")
+    ok_btn_tmp_grey = make_img_grey("media/ok_button.png")
 
-    scrn_img_rgb = cv2.imread("media/is_ok_button.png")
-    scrn_img_grey = cv2.cvtColor(scrn_img_rgb, cv2.COLOR_BGR2RGB)
-    
-    scrn_tmp_rgb = cv2.imread("media/ok_button.png")
-    scrn_tmp_grey = cv2.cvtColor(scrn_tmp_rgb, cv2.COLOR_BGR2RGB)
+    menu_result = cv2.matchTemplate(base_screen_grey, base_tmp_grey, cv2.TM_CCOEFF_NORMED)
+    ok_btn_result = cv2.matchTemplate(is_ok_btn_grey, ok_btn_tmp_grey, cv2.TM_CCOEFF_NORMED)
 
-    res1 = cv2.matchTemplate(base_img_grey, base_tmp_grey, cv2.TM_CCOEFF_NORMED)
-    res2 = cv2.matchTemplate(scrn_img_grey, scrn_tmp_grey, cv2.TM_CCOEFF_NORMED)
-
-    if res1[0][0] > 0.5:
-        await enter_latest_live_match(player)
+    if menu_result[0][0] > 0.5:
+        await enter_latest_live_match()
         return True
-    elif res2[0][0] > 0.7:
+    elif ok_btn_result[0][0] > 0.7:
         pydirectinput.press("esc")
         pass
     else:
-        print("in game")
+        print("In game")
         return False
-
-
-
-async def get_hero(hero_id):
-    result = ""
-    for hero in heroes:
-        if hero_id == hero["id"]:
-            result = hero['localized_name']
-    if hero:
-        return result
-    else:
-        return None
     
 
 
-async def get_statistics(latest_match, start=True):
+async def get_statistics(latest_match, start=True, update=False):
     if start:
-        # players = latest_match["players"]
         server_steam_id = int(latest_match['server_steam_id'])
         match_info_json = sess.get(f"https://api.steampowered.com/IDOTA2MatchStats_570/GetRealtimeStats/v1?key=266DD08608085CE8EC90240302249C49&server_steam_id={server_steam_id}")
         match_info = json.loads(match_info_json.content)
-        teams = match_info["teams"]
-        team_radiant = ""
-        team_dire = ""
-        message = ""
-        message += f"🔴 Live Match | Average MMR:{latest_match['average_mmr']}\n"
-        # message += f"Match id: {latest_match['match_id']}\n\n"
+        try:    
+            teams = match_info["teams"]
+            team_radiant = ""
+            team_dire = ""
+            message = ""
+            message += f"🔴 Live Match | Average MMR:{latest_match['average_mmr']}\n"
 
-        players_radiant = teams[0]["players"]
-        # print(players_radiant)
-        players_dire = teams[1]["players"]
+            players_radiant = teams[0]["players"]
+            players_dire = teams[1]["players"]
 
-        team_radiant += f"\n1🏳️Team Radiant:\n"
-        team_dire += f"\n🏴Team Dire:\n"
+            team_radiant += f"\n1🏳️Team Radiant:\n"
+            team_dire += f"\n🏴Team Dire:\n"
 
-        team_radiant = await divide_into_teams(players=players_radiant, message=team_radiant, is_rad=True)
-        team_dire = await divide_into_teams(players=players_dire, message=team_dire, is_rad=False) 
+            team_radiant = await divide_into_teams(players=players_radiant, message=team_radiant, is_rad=True, update=update)
+            team_dire = await divide_into_teams(players=players_dire, message=team_dire, is_rad=False, update=update) 
 
-        message += team_radiant
-        message += team_dire
+            message += team_radiant
+            message += team_dire
+
+        except KeyError:
+            print("!!! Key Error in get_statistics !!!")
+
         print(message)   
         return message
 
 
 
-async def divide_into_teams(players, message, is_rad=True):
+async def divide_into_teams(players, message, is_rad=True, update=False):
     for num, player in enumerate(players):
+        
+        # Enumerating by order
         if is_rad:
             num += 1
         elif not is_rad:
             num += 6
+
         try:
             account_json = sess.get(f"https://api.opendota.com/api/players/{player['accountid']}/")
             account = json.loads(account_json.content)
@@ -204,9 +267,9 @@ async def divide_into_teams(players, message, is_rad=True):
             pro = await is_pro(player)
             if pro:
                 if player['heroid'] == 0:
-                    message += f"{num}. <b>{pro['personaname']} ({pro['name']}) | Draft | {account['leaderboard_rank']}</b>\n"
+                    message += f"{num}. {pro['personaname']} ({pro['name']}) | Draft | {account['leaderboard_rank']}\n"
                 else:
-                    message += f"{num}. <b>{pro['personaname']} ({pro['name']}) | {await get_hero(player['heroid'])} | {account['leaderboard_rank']}</b>\n"
+                    message += f"{num}. {pro['personaname']} ({pro['name']}) | {await get_hero(player['heroid'])} | {account['leaderboard_rank']}\n"
             else:
                 if player['heroid'] == 0:
                     message += f"{num}. {account_profile['personaname']} | Draft | {account['leaderboard_rank']}\n"
@@ -222,6 +285,7 @@ async def divide_into_teams(players, message, is_rad=True):
 async def is_pro(player):
     json_all_pro = sess.get("https://api.opendota.com/api/proPlayers")
     all_pro = json.loads(json_all_pro.content)
+
     for pro in all_pro:
         if pro["account_id"] == player["accountid"]:
             return pro
@@ -232,14 +296,13 @@ async def is_pro(player):
 
 
 async def send_statistics(message):
+
     for channel in CHANNELS:
         chat = await bot.get_chat(channel)
         pinned = int(chat["pinned_message"]["message_id"])
         new_message_id = pinned + 2
         service_message_id = pinned + 1
         await bot.delete_message(channel, message_id=service_message_id)
-        time.sleep(0.3)
-        await bot.unpin_chat_message(channel, message_id=pinned)
         time.sleep(0.3)
         await bot.send_message(chat_id=channel, text=message, parse_mode=types.ParseMode.HTML)
         time.sleep(0.3)
@@ -248,32 +311,21 @@ async def send_statistics(message):
 
 
 
-async def get_match_info(match_id):
-    time.sleep(2)
-    await check_in_menu(1)
-    match_info_json = sess.get(f"https://api.opendota.com/api/matches/{match_id}")
-    match_info = json.loads(match_info_json.content)
-    try:
-        print(match_info['match_id'])
-        return True
-    except KeyError:
-        pass
-
-
-
 async def update_statistics(match_id):
+    new_info_json = sess.get("https://api.opendota.com/api/live")
+    new_info = json.loads(new_info_json.content)
     for channel in CHANNELS:
         chat = await bot.get_chat(channel)
         pinned = int(chat["pinned_message"]["message_id"])
         time.sleep(3)
-        new_info_json = sess.get("https://api.opendota.com/api/live")
-        new_info = json.loads(new_info_json.content)
         for match in new_info:
             if match['match_id'] == match_id:
                 return match
-        new_message = await get_statistics(match)
+        new_message = await get_statistics(match, update=True)
         await bot.edit_message_text(text=new_message+f"\nMatch is started!", chat_id=channel, message_id=pinned)
         print("updated! Live status.")
+
+
 
 
 
@@ -281,15 +333,15 @@ async def main():
     set_active_dota()
     time.sleep(2)
     while True:
-        await check_in_menu(1)
+        await check_in_menu()
         time.sleep(3)
 
 
-
-loop = asyncio.get_event_loop()
-loop.create_task(main())
-loop.run_forever()
-pending = asyncio.all_tasks(loop=loop)
-group = asyncio.gather(*pending, return_exceptions=True)
-loop.run_until_complete(group)
-loop.close()
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_forever()
+    pending = asyncio.all_tasks(loop=loop)
+    group = asyncio.gather(*pending, return_exceptions=True)
+    loop.run_until_complete(group)
+    loop.close()
